@@ -1,19 +1,37 @@
-import json
 import pandas as pd # type: ignore
 import os
-from generator import ql_to_json
 
 class CSVAdapter:
     def __init__(self, folder_path="."):
         self.folder_path = folder_path
 
     def _apply_filter(self, df, col, logic):
-        """Processes __ge__, __le__, and $or operators."""
-        if isinstance(logic, dict):
-            for op, val in logic.items():
-                if op == "__ge__": df = df[df[col].astype(float) >= float(val)]
-                elif op == "__le__": df = df[df[col].astype(float) <= float(val)]
-                elif op == "$or": df = df[df[col].astype(str).isin([str(i) for i in val])]
+        """Applies filters while keeping the index synchronized."""
+        if not isinstance(logic, dict): 
+            return df
+            
+        try:
+            # 1. Set Filtering
+            if "$or" in logic:
+                allowed = [str(i) for i in logic["$or"]]
+                df = df[(df[col].astype(str).isin(allowed)) | 
+                        (pd.to_numeric(df[col], errors='coerce').isin(logic["$or"]))]
+            
+            # 2. Range Filtering 
+            # We call pd.to_numeric(df[col]) inside each filter to ensure 
+            # the index matches the current (potentially already filtered) df.
+            if "__ge__" in logic: 
+                df = df[pd.to_numeric(df[col], errors='coerce') >= float(logic["__ge__"])]
+            if "__gt__" in logic: 
+                df = df[pd.to_numeric(df[col], errors='coerce') > float(logic["__gt__"])]
+            if "__le__" in logic: 
+                df = df[pd.to_numeric(df[col], errors='coerce') <= float(logic["__le__"])]
+            if "__lt__" in logic: 
+                df = df[pd.to_numeric(df[col], errors='coerce') < float(logic["__lt__"])]
+                
+        except Exception as e:
+            print(f"Filter error on column {col}: {e}")
+            
         return df
 
     def execute(self, table_name, node, context=None):
@@ -21,54 +39,66 @@ class CSVAdapter:
         if not os.path.exists(file_path): return []
         
         df = pd.read_csv(file_path)
-        
-        # 1. Row-level Filtering (Remains same as previous)
+        meta = node.get("__meta__", {"strict_keys": [], "internal_keys": []})
+
+        # 1. Prune rows based on filters
         for key, logic in node.items():
+            if key == "__meta__": continue
             if key in df.columns:
                 if isinstance(logic, str) and logic.startswith("="):
-                    var_name = logic[1:]; val = context.get(var_name) if context else None
+                    var_name = logic[1:].split(" ")[0]
+                    val = context.get(var_name) if context else None
                     if val is not None: df = df[df[key].astype(str) == str(val)]
-                elif isinstance(logic, dict) and any(k.startswith(('_', '$')) for k in logic.keys()):
+                elif isinstance(logic, dict) and any(k.startswith(('_', '$')) for k in logic.keys() if k != "__meta__"):
                     df = self._apply_filter(df, key, logic)
 
-        # 2. Updated Result Construction
         results = []
         for _, row in df.iterrows():
             item = {}
             row_context = context.copy() if context else {}
+            skip_row = False
             
-            # Assignments first: id := dir_var
-            for key, val in node.items():
-                if isinstance(val, str) and val.startswith(":="):
-                    alias_name = val[2:] # Extract 'dir_var'
-                    row_context[alias_name] = row[key]
-                    item[alias_name] = row[key] # Use 'dir_var' as the KEY
-            
-            # Selections and Nesting
-            for key, val in node.items():
-                # Skip if already handled as an alias
-                if isinstance(val, str) and val.startswith(":="): continue
+            # 2. Build result item
+            for key, logic in node.items():
+                if key == "__meta__": continue
                 
-                if isinstance(val, dict) and len(val) > 0 and not any(k.startswith(('_', '$')) for k in val.keys()):
-                    item[key] = self.execute(key, val, context=row_context)
-                else:
-                    item[key] = row[key]
-            results.append(item)
-        return results
+                out_key = key
+                if isinstance(logic, str) and ":=" in logic:
+                    out_key = logic.split(":=")[-1].strip()
 
-if __name__ == "__main__":
-    gql_query = """
-    directors {
-        id := dir_var,
-        name,
-        country : {"India", "USA"},
-        movies {
-            name,
-            budget : [50, 100],
-            director_id = dir_var
-        }
-    }
-    """
-    ast = ql_to_json(gql_query)
-    root = list(ast.keys())[0]
-    print(json.dumps(CSVAdapter().execute(root, ast[root]), indent=4))
+                # REFINED LOGIC: 
+                # A subtable is a dict that contains keys OTHER THAN __meta__ 
+                # AND does not contain operator keys like __ge__ or $or.
+                is_subtable = (isinstance(logic, dict) and 
+                               any(k != "__meta__" for k in logic.keys()) and 
+                               not any(k.startswith(('_', '$')) for k in logic.keys() if k != "__meta__"))
+
+                if is_subtable:
+                    sub_data = self.execute(key, logic, context=row_context)
+                    # ! STRICT CHECK
+                    if key in meta["strict_keys"] and not sub_data:
+                        skip_row = True
+                        break
+                    item[out_key] = sub_data
+                else:
+                    # It's a regular column or a simple attribute
+                    if key in df.columns:
+                        val = row[key]
+                        item[out_key] = val
+                        # Ensure assignments (:=) are saved for context
+                        if isinstance(logic, str) and ":=" in logic:
+                            row_context[out_key] = val
+
+            if skip_row: continue
+
+            # 3. ~ INTERNAL CHECK: Strip hidden fields
+            for int_key in meta["internal_keys"]:
+                actual_out_key = int_key
+                l_val = node.get(int_key)
+                if isinstance(l_val, str) and ":=" in l_val:
+                    actual_out_key = l_val.split(":=")[-1].strip()
+                item.pop(actual_out_key, None)
+
+            results.append(item)
+            
+        return results

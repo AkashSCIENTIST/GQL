@@ -9,6 +9,7 @@ def run_query(gql_file_path, data_folder):
 
     # Get AST as a dictionary
     query_ast = ql_to_json(gql_content) 
+    # print(json.dumps(query_ast, indent=4))
 
     # Initialize Adapter with folder where CSVs are kept
     adapter = CSVAdapter(folder_path=data_folder)

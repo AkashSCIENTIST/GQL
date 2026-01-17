@@ -2,9 +2,9 @@ directors {
     id := dir_var,
     name,
     country : {"India"},
-    movies {
+    !movies {
         name,
         budget : [50, 100],
-        director_id = dir_var
+        ~director_id = dir_var := directors_id
     }
 }
