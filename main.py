@@ -22,4 +22,4 @@ def run_query(gql_file_path, data_folder):
 
 if __name__ == "__main__":
     # Point to the directory containing directors.csv and movies.csv
-    run_query("query.gql", ".")
+    run_query("query.gql", "./data")
