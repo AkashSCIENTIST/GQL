@@ -1,0 +1,6 @@
+id,name,director_id,budget,rating,genre
+1,Bahubali,d1,200,8.1,Action
+2,Singam,d2,50,6.5,Action
+3,Robo,d3,150,7.1,Sci-Fi
+4,S3,d2,5,6.2,Action
+5,Avatar,d4,237,7.9,Sci-Fi
