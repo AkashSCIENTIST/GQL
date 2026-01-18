@@ -45,17 +45,46 @@ $global {
 }
 
 ### 2. Write your Query (query.gql)
+```
+$global {
+    min_budget : 50,
+    low_movie_budget : [$min_budget, 100],
+    high_movie_budget : [101, 500],
+    target_country : {"India", "Sri Lanka"}
+}
+
 <directors> {
     id := dir_var,
-    country : $target,
+    country : $target_country,  # Using global variable
     name,
-    !<movies> *{
+    <movies> {
         name,
-        genre,
-        ~budget: [$min_pay, 100],
-        ~director_id = dir_var
-    } := directed_movies
-}
+        ~budget : $low_movie_budget,
+        ~director_id = dir_var := directors_id
+    } := low_budget_movies,
+    <movies> {
+        name,
+        budget : $high_movie_budget,
+        ~director_id = dir_var := directors_id
+    } := high_budget_movies
+} := directors_india
+
+<directors> {
+    id := dir_var,
+    country : "USA",  # Using local variable
+    name,
+    <movies> {
+        name,
+        ~budget : $low_movie_budget,
+        ~director_id = dir_var := directors_id
+    } := low_budget_movies,
+    <movies> {
+        name,
+        budget : $high_movie_budget,
+        ~director_id = dir_var := directors_id
+    } := high_budget_movies
+} := directors_usa
+```
 
 ### 3. Run it
 - python main.py
