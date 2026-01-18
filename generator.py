@@ -2,161 +2,180 @@ import re
 import json
 
 class GQLParser:
-    def __init__(self):
+    def __init__(self, verbose=True):
+        self.verbose = verbose
         self.token_specification = [
-            ('STRICT',   r'!'),                     # !Table
-            ('INTERNAL', r'~'),                     # ~Field
-            ('PLUCK',    r'\*'),                    # *{
-            ('ALIAS',    r':='),                    # :=
-            ('LBRACE',   r'\{'),                    
-            ('RBRACE',   r'\}'),                    
-            ('LPAREN',   r'\('),                    
-            ('RPAREN',   r'\)'),                    
-            ('LBRACKET', r'\['),                    
-            ('RBRACKET', r'\]'),                    
-            ('COLON',    r':'),                     
-            ('EQ',       r'='),                     
-            ('COMMA',    r','),                     
-            ('ID',       r'[a-zA-Z_][a-zA-Z0-9_\.]*'), 
-            ('NUMBER',   r'-?\d+(\.\d+)?'),         
-            ('STRING',   r'"[^"]*"|\'[^\']*\''),    
-            ('SKIP',     r'[ \t\n\r]+'),            
+            ('STRICT',   r'!'), ('INTERNAL', r'~'), ('PLUCK',    r'\*'),
+            ('ALIAS',    r':='), ('LBRACE',   r'\{'), ('RBRACE',   r'\}'),
+            ('LBRACKET', r'\['), ('RBRACKET', r'\]'), ('COLON',    r':'), 
+            ('EQ',       r'='), ('COMMA',    r','), 
+            ('TABLE',    r'<[a-zA-Z_0-9]+>'), 
+            ('ID',       r'\$?[a-zA-Z_][a-zA-Z0-9_\.]*'), 
+            ('NUMBER',   r'-?\d+(\.\d+)?'), # Explicit number token
+            ('SKIP',     r'[ \t\r]+'), ('NEWLINE',  r'\n'),
         ]
         self.re_tokens = "|".join(f"(?P<{name}>{pattern})" for name, pattern in self.token_specification)
+
+    def _log(self, msg):
+        if self.verbose: print(f"[MACRO VERBOSE] {msg}")
+
+    def _smart_cast(self, val):
+        v = str(val).strip().strip('"').strip("'")
+        try:
+            if '.' in v: return float(v)
+            return int(v)
+        except ValueError: return v
+
+    def _format_range(self, val_str):
+        val_str = str(val_str).strip()
+        if (val_str.startswith('[') or val_str.startswith('(')) and ',' in val_str:
+            op, cl = val_str[0], val_str[-1]
+            parts = val_str[1:-1].split(',')
+            return {
+                ("__ge__" if op == '[' else "__gt__"): self._smart_cast(parts[0]), 
+                ("__le__" if cl == ']' else "__lt__"): self._smart_cast(parts[1])
+            }
+        return self._smart_cast(val_str)
+
+    def parse_variables_block(self):
+        """Strictly captures values immediately following the colon."""
+        d = {}
+        while self.pos < len(self.tokens):
+            k, v = self.peek()
+            if k == 'RBRACE': 
+                self.consume()
+                break
+            
+            if k == 'ID':
+                name = self.consume()[1]
+                var_key = name if name.startswith('$') else f"${name}"
+                
+                if self.peek()[0] == 'COLON':
+                    self.consume() # Consume COLON
+                    # parse_expr starts exactly at the next token
+                    val = self.parse_expr()
+                    d[var_key] = val
+                    self._log(f"Parsed Global: {var_key} raw value is '{val}'")
+            
+            elif k in ('COMMA', 'NEWLINE'):
+                self.consume()
+            else:
+                self.pos += 1
+        return d
+
+    def parse_expr(self):
+        """Collects tokens into a string until a boundary is hit."""
+        res = []
+        depth = 0
+        while self.pos < len(self.tokens):
+            k, v = self.peek()
+            
+            # Boundary check
+            if depth == 0 and k in ('COMMA', 'NEWLINE', 'RBRACE'):
+                break
+            
+            # Track nesting for ranges [,]
+            if k in ('LBRACKET', 'LBRACE'): depth += 1
+            if k in ('RBRACKET', 'RBRACE'): depth -= 1
+            
+            res.append(self.consume()[1])
+        return "".join(res).strip()
+
+    def resolve_macros(self, ast):
+        if "__globals__" not in ast: return ast
+        raw_macros = ast.pop("__globals__")
+        resolved_strings = {}
+
+        # 1. String-level resolution (replacing $vars inside other $vars)
+        sorted_keys = sorted(raw_macros.keys(), key=len, reverse=True)
+        
+        def _get_deep_string(val):
+            curr_val = str(val)
+            for k in sorted_keys:
+                if k in curr_val:
+                    # Find what the variable points to
+                    sub_content = raw_macros[k]
+                    # If that content is also a variable, recurse
+                    if isinstance(sub_content, str) and sub_content.startswith('$'):
+                        sub_content = _get_deep_string(sub_content)
+                    curr_val = curr_val.replace(k, str(sub_content))
+            return curr_val
+
+        self._log("Starting Global Resolution...")
+        for k in sorted_keys:
+            final_str = _get_deep_string(raw_macros[k])
+            resolved_strings[k] = final_str
+            self._log(f"  {k} -> {final_str}")
+
+        # 2. Injection and Dictionary conversion
+        def _inject(node):
+            if isinstance(node, dict):
+                return {k: _inject(v) for k, v in node.items()}
+            if isinstance(node, str):
+                # Is it a direct variable like "$movie_budget"?
+                if node.startswith('$') and node in resolved_strings:
+                    return self._format_range(resolved_strings[node])
+                # Is it a string containing variables?
+                if '$' in node:
+                    for k, v in resolved_strings.items():
+                        node = node.replace(k, str(v))
+                    return self._format_range(node)
+            return node
+
+        return _inject(ast)
+
+    # --- Basic Parser Logic ---
+    def parse(self, code):
+        self.tokens = list(self.tokenize(code))
+        self.pos = 0
+        raw_ast = {}
+        while self.pos < len(self.tokens):
+            k, v = self.peek()
+            if k == 'ID' and v == "$global":
+                self.consume(); self.consume()
+                raw_ast["__globals__"] = self.parse_variables_block()
+            elif k == 'TABLE':
+                t_name = self.consume()[1][1:-1]
+                self.consume()
+                raw_ast[t_name] = self.parse_block()
+            else: self.pos += 1
+        return self.resolve_macros(raw_ast)
+
+    def parse_block(self):
+        node = {"__meta__": {"strict_keys": [], "internal_keys": [], "pluck": False}}
+        while self.pos < len(self.tokens):
+            k, v = self.peek()
+            if k == 'RBRACE': self.consume(); break
+            s = i = p = False
+            while self.peek()[0] in ('STRICT', 'INTERNAL'):
+                m = self.consume()[0]
+                if m == 'STRICT': s = True
+                if m == 'INTERNAL': i = True
+            k, v = self.peek()
+            if k == 'TABLE':
+                tn = self.consume()[1][1:-1]
+                if s: node["__meta__"]["strict_keys"].append(tn)
+                if self.peek()[0] == 'PLUCK': self.consume(); p = True
+                self.consume(); sub = self.parse_block()
+                sub["__meta__"]["pluck"] = p
+                if self.peek()[0] == 'ALIAS': self.consume(); sub["__meta__"]["alias"] = self.consume()[1]
+                node[tn] = sub
+            elif k == 'ID':
+                ident = self.consume()[1]
+                if i: node["__meta__"]["internal_keys"].append(ident)
+                nk, nv = self.peek()
+                if nk == 'ALIAS': self.consume(); node[ident] = f":={self.consume()[1]}"
+                elif nk == 'COLON': self.consume(); node[ident] = self.parse_expr()
+                elif nk == 'EQ': self.consume(); node[ident] = f"={self.parse_expr()}"
+                else: node[ident] = {}
+            elif k in ('COMMA', 'NEWLINE'): self.consume()
+            else: self.pos += 1
+        return node
 
     def tokenize(self, code):
         for mo in re.finditer(self.re_tokens, code):
             if mo.lastgroup == 'SKIP': continue
             yield mo.lastgroup, mo.group()
 
-    def _format_val(self, val):
-        val = val.strip()
-        if not val: return {}
-        # Range logic
-        if (val.startswith('[') or val.startswith('(')) and ',' in val:
-            op, cl = val[0], val[-1]
-            parts = val[1:-1].split(',')
-            try:
-                v1, v2 = float(parts[0].strip()), float(parts[1].strip())
-                if v1 == v2: return {"$or": [v1]}
-                return {("__ge__" if op == '[' else "__gt__"): v1, ("__le__" if cl == ']' else "__lt__"): v2}
-            except: return val
-        # Set logic
-        if val.startswith('{') and val.endswith('}'):
-            items = val[1:-1].split(',')
-            cleaned = []
-            for i in items:
-                item = i.strip().strip('"').strip("'")
-                if not item: continue
-                try: cleaned.append(float(item) if '.' in item else int(item))
-                except: cleaned.append(item)
-            return {"$or": cleaned}
-        return val
-
-    def parse(self, code):
-        self.tokens = list(self.tokenize(code))
-        self.pos = 0
-        if not self.tokens: return {}
-        k, v = self.peek()
-        if k == 'ID':
-            root_name = self.consume()[1]
-            if self.peek()[0] == 'LBRACE':
-                self.consume()
-                return {root_name: self.parse_block()}
-        return {}
-
-    def peek(self, n=0):
-        return self.tokens[self.pos + n] if self.pos + n < len(self.tokens) else (None, None)
-
-    def consume(self):
-        val = self.tokens[self.pos]
-        self.pos += 1
-        return val
-
-    def is_table_block(self):
-        """Checks if the current '{' belongs to a nested table or a data set."""
-        k1, v1 = self.peek(0) 
-        k2, v2 = self.peek(1)
-        if k1 == 'ID' and k2 in ('COLON', 'ALIAS', 'EQ', 'LBRACE', 'COMMA', 'RBRACE', 'PLUCK'):
-            return True
-        if k1 in ('STRICT', 'INTERNAL', 'PLUCK'):
-            return True
-        return False
-
-    def parse_expr(self):
-        """Depth-aware expression parsing to capture [min, max] ranges fully."""
-        res, depth = [], 0
-        while self.pos < len(self.tokens):
-            k, v = self.peek()
-            if k in ('LBRACE', 'LPAREN', 'LBRACKET'): depth += 1
-            elif k in ('RBRACE', 'RPAREN', 'RBRACKET'):
-                if depth == 0: break
-                depth -= 1
-            if k == 'COMMA' and depth == 0: break
-            res.append(self.consume()[1])
-        return "".join(res)
-
-    def parse_block(self):
-        """Parses a table block including markers like !, ~, and *."""
-        node = {"__meta__": {"strict_keys": [], "internal_keys": [], "pluck": False}}
-        
-        while self.pos < len(self.tokens):
-            k, v = self.peek()
-            if k == 'RBRACE':
-                self.consume()
-                break
-            
-            is_strict = is_internal = is_pluck = False
-            if k == 'STRICT': self.consume(); is_strict = True; k, v = self.peek()
-            if k == 'INTERNAL': self.consume(); is_internal = True; k, v = self.peek()
-            
-            if k == 'ID':
-                ident = self.consume()[1]
-                if is_strict: node["__meta__"]["strict_keys"].append(ident)
-                if is_internal: node["__meta__"]["internal_keys"].append(ident)
-                
-                nk, nv = self.peek()
-                
-                # Check for Pluck marker right after ID: movies *{
-                if nk == 'PLUCK':
-                    self.consume() 
-                    is_pluck = True
-                    nk, nv = self.peek()
-
-                if nk == 'COLON':
-                    self.consume()
-                    if self.peek()[0] == 'LBRACE' and self.is_table_block():
-                        self.consume() 
-                        node[ident] = self.parse_block()
-                        if is_pluck: node[ident]["__meta__"]["pluck"] = True
-                        if self.peek()[0] == 'ALIAS':
-                            self.consume(); node[ident]["__meta__"]["alias"] = self.consume()[1]
-                    else:
-                        node[ident] = self._format_val(self.parse_expr())
-                
-                elif nk == 'EQ':
-                    self.consume()
-                    m_var = self.consume()[1]
-                    node[ident] = f"={m_var}"
-                    if self.peek()[0] == 'ALIAS':
-                        self.consume(); node[ident] += f" :={self.consume()[1]}"
-                
-                elif nk == 'ALIAS':
-                    self.consume(); node[ident] = f":={self.consume()[1]}"
-                
-                elif nk == 'LBRACE':
-                    self.consume()
-                    node[ident] = self.parse_block()
-                    if is_pluck: node[ident]["__meta__"]["pluck"] = True
-                    if self.peek()[0] == 'ALIAS':
-                        self.consume(); node[ident]["__meta__"]["alias"] = self.consume()[1]
-                else:
-                    node[ident] = {}
-                    
-            elif k == 'COMMA': self.consume()
-            else: self.pos += 1
-                
-        return node
-
-def ql_to_json(gql_string):
-    return GQLParser().parse(gql_string)
+    def peek(self, n=0): return self.tokens[self.pos+n] if self.pos+n < len(self.tokens) else (None, None)
+    def consume(self): t=self.tokens[self.pos]; self.pos+=1; return t

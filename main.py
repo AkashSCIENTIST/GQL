@@ -1,25 +1,27 @@
 import json
-from generator import ql_to_json
-# Assuming your adapter is in adapters/csv_adapter.py
-from adapters.csv_adapter import CSVAdapter 
+from generator import GQLParser
+from adapters.csv_adapter import CSVAdapter
 
-def run_query(gql_file_path, data_folder):
-    with open(gql_file_path, 'r') as f:
-        gql_content = f.read()
+def run():
+    with open("query.gql", "r") as f:
+        gql = f.read()
 
-    # Get AST as a dictionary
-    query_ast = ql_to_json(gql_content) 
-    # print(json.dumps(query_ast, indent=4))
+    parser = GQLParser()
+    query_ast = parser.parse(gql) 
 
-    # Initialize Adapter with folder where CSVs are kept
-    adapter = CSVAdapter(folder_path=data_folder)
+    print("--- FULLY RESOLVED AST ---")
+    print(json.dumps(query_ast, indent=4))
+    print("-" * 30)
 
-    # Execute from the root table
-    root_table = list(query_ast.keys())[0]
-    results = adapter.execute(root_table, query_ast[root_table])
+    # Note: Use the CSVAdapter provided in previous steps
+    adapter = CSVAdapter(folder_path="./data")
     
-    print(json.dumps(results, indent=4))
+    output = {}
+    for table_name in query_ast:
+        output[table_name] = adapter.execute(table_name, query_ast[table_name])
+    
+    print("--- RESULTS ---")
+    print(json.dumps(output, indent=4))
 
 if __name__ == "__main__":
-    # Point to the directory containing directors.csv and movies.csv
-    run_query("query.gql", "./data")
+    run()

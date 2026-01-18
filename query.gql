@@ -1,10 +1,16 @@
-directors {
+$global {
+    min_budget : 50,
+    movie_budget : [$min_budget, 100]
+    target_country : "India"
+}
+
+<directors> {
     id := dir_var,
-    country : {"India"},
+    country : $target_country,  # Using global variable
     name,
-    !movies *{
+    !<movies> *{
         name,
-        ~budget : [50, 100],
+        budget : $movie_budget,
         ~director_id = dir_var := directors_id
     } := directed_movies
 }

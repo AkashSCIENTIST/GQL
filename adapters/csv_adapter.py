@@ -2,106 +2,139 @@ import pandas as pd # type: ignore
 import os
 
 class CSVAdapter:
-    def __init__(self, folder_path="."):
+    def __init__(self, folder_path=".", verbose=True):
         self.folder_path = folder_path
+        self.verbose = verbose
+
+    def _log(self, msg):
+        """Internal logger for execution tracing."""
+        if self.verbose: 
+            print(f"[ADAPTER VERBOSE] {msg}")
 
     def _apply_filter(self, df, col, logic):
-        """Applies mathematical range and set filters with dynamic index alignment."""
+        """Applies numeric range logic (>=, <=, >, <) to a DataFrame column."""
         if not isinstance(logic, dict): 
             return df
-        try:
-            # 1. Set/Equality Matching
-            if "$or" in logic:
-                allowed = [str(i) for i in logic["$or"]]
-                # Dual-type check: Match against string or numeric values in CSV
-                df = df[
-                    (df[col].astype(str).isin(allowed)) | 
-                    (pd.to_numeric(df[col], errors='coerce').isin(logic["$or"]))
-                ]
-            
-            # 2. Mathematical Range Matching (Fixed to prevent UserWarnings)
-            if "__ge__" in logic: 
-                df = df[pd.to_numeric(df[col], errors='coerce') >= float(logic["__ge__"])]
-            if "__gt__" in logic: 
-                df = df[pd.to_numeric(df[col], errors='coerce') > float(logic["__gt__"])]
-            if "__le__" in logic: 
-                df = df[pd.to_numeric(df[col], errors='coerce') <= float(logic["__le__"])]
-            if "__lt__" in logic: 
-                df = df[pd.to_numeric(df[col], errors='coerce') < float(logic["__lt__"])]
-        except Exception as e:
-            print(f"Filter error on column {col}: {e}")
+        
+        # Convert column to numeric for mathematical comparison
+        col_num = pd.to_numeric(df[col], errors='coerce')
+        ops = {"__ge__": ">=", "__gt__": ">", "__le__": "<=", "__lt__": "<"}
+        
+        for k, p_op in ops.items():
+            if k in logic:
+                lim = float(logic[k])
+                if p_op == ">=": df = df[col_num >= lim]
+                elif p_op == ">": df = df[col_num > lim]
+                elif p_op == "<=": df = df[col_num <= lim]
+                elif p_op == "<": df = df[col_num < lim]
+                self._log(f"      Filter {col} {p_op} {lim}: {len(df)} rows remain.")
         return df
 
     def execute(self, table_name, node, context=None):
+        """
+        Main execution engine. 
+        Handles CSV loading, Filtering, Joins, and Recursive sub-table calls.
+        """
         file_path = os.path.join(self.folder_path, f"{table_name}.csv")
         if not os.path.exists(file_path): 
+            self._log(f"File {file_path} missing.")
             return []
         
-        df = pd.read_csv(file_path)
-        meta = node.get("__meta__", {"strict_keys": [], "internal_keys": [], "pluck": False})
+        # Load data as strings and strip whitespace
+        df = pd.read_csv(file_path, dtype=str)
+        df.columns = df.columns.str.strip()
+        df = df.map(lambda x: str(x).strip() if pd.notnull(x) else "")
+        
+        meta = node.get("__meta__", {})
+        context = context or {}
 
-        # --- PHASE 1: FILTERING ---
-        for key, logic in node.items():
-            if key == "__meta__": continue
-            if key in df.columns:
-                if isinstance(logic, str) and logic.startswith("="):
-                    var_name = logic[1:].split(" ")[0]
-                    val = context.get(var_name) if context else None
-                    if val is not None:
-                        df = df[df[key].astype(str) == str(val)]
-                elif isinstance(logic, dict) and any(k.startswith(('_', '$')) for k in logic.keys() if k != "__meta__"):
-                    df = self._apply_filter(df, key, logic)
+        # --- PHASE 1: FILTERING PASS ---
+        for k, l in node.items():
+            # Skip metadata and keys that don't exist in CSV (like noise keys or sub-tables)
+            if k == "__meta__" or k not in df.columns:
+                continue
+            
+            # Skip pure assignments (id := dir_var) from filtering
+            if isinstance(l, str) and l.startswith(":="):
+                continue
+            
+            # Case 1: Range logic (Dictionaries)
+            if isinstance(l, dict):
+                df = self._apply_filter(df, k, l)
+            
+            # Case 2: Join Logic (=dir_var)
+            elif isinstance(l, str) and l.startswith("="):
+                # Extract variable name (supports =var:=alias format)
+                v_name = l[1:].split(":=")[0].strip()
+                val = str(context.get(v_name, "")).strip()
+                if val:
+                    df = df[df[k] == val]
+                    self._log(f"      Join {k} == {val}: {len(df)} rows remain.")
+            
+            # Case 3: Scalar Match (India, 25, etc.)
+            elif l != {}:
+                df = df[df[k].str.lower() == str(l).lower()]
 
-        # --- PHASE 2: PROCESSING ROWS ---
+        # --- PHASE 2: ITERATION & RECURSION ---
         results = []
         for _, row in df.iterrows():
-            item = {}
-            row_context = context.copy() if context else {}
-            skip_row = False
+            item, row_ctx, skip = {}, context.copy(), False
             
-            for key, logic in node.items():
-                if key == "__meta__": continue
+            # A. PRE-MAP: Populate row_ctx with all available columns for children
+            for k, l in node.items():
+                if k in df.columns:
+                    # If aliased (id := dir_var), store value as 'dir_var'
+                    ctx_key = l[2:] if (isinstance(l, str) and l.startswith(":=")) else k
+                    row_ctx[ctx_key] = row[k]
+
+            # B. EXECUTE: Build final fields and sub-tables
+            for k, l in node.items():
+                if k == "__meta__": continue
                 
-                out_key = key
-                if isinstance(logic, str) and ":=" in logic:
-                    out_key = logic.split(":=")[-1].strip()
-
-                is_subtable = (isinstance(logic, dict) and 
-                               any(k != "__meta__" for k in logic.keys()) and 
-                               not any(k.startswith(('_', '$')) for k in logic.keys() if k != "__meta__"))
-
-                if is_subtable:
-                    block_meta = logic.get("__meta__", {})
-                    out_key = block_meta.get("alias", key)
+                # Determine output key (handle ALIAS :=)
+                out_k = l.split(":=")[-1].strip() if (isinstance(l, str) and ":=" in l) else k
+                
+                # If the value is a nested dictionary with metadata, it's a sub-table
+                if isinstance(l, dict) and "__meta__" in l:
+                    sub_res = self.execute(k, l, context=row_ctx)
                     
-                    sub_data = self.execute(key, logic, context=row_context)
-                    if key in meta.get("strict_keys", []) and not sub_data:
-                        skip_row = True
-                        break
-                    item[out_key] = sub_data
+                    # STRICT (!) handling: drop parent if child is empty
+                    if k in meta.get("strict_keys", []) and not sub_res:
+                        skip = True; break
+                    
+                    sub_alias = l["__meta__"].get("alias", k)
+                    item[sub_alias] = sub_res
+                
+                # Otherwise, it's a field projection
+                elif k in df.columns:
+                    item[out_k] = row[k]
+
+            # C. CLEANUP: Filter out skipped rows and internal (~) keys
+            if not skip:
+                for int_k in meta.get("internal_keys", []):
+                    # Remove the field by its final output name
+                    pop_k = node[int_k].split(":=")[-1].strip() if ":=" in str(node[int_k]) else int_k
+                    item.pop(pop_k, None)
+                results.append(item)
+
+        # --- PHASE 3: PLUCK (*) ---
+        # Converts list of dicts to list of values
+        if meta.get("pluck") and results:
+            plucked_results = []
+            for item in results:
+                vals = list(item.values())
+                # If a row has only 1 field, take the scalar value
+                # If a row has multiple fields, take the list of values
+                if len(vals) == 1:
+                    plucked_results.append(vals[0])
                 else:
-                    if key in df.columns:
-                        val = row[key]
-                        item[out_key] = val
-                        if isinstance(logic, str) and ":=" in logic:
-                            row_context[out_key] = val
-
-            if skip_row: continue
-
-            # --- PHASE 3: INTERNAL KEY STRIPPING ---
-            for int_key in meta.get("internal_keys", []):
-                actual_out_key = int_key
-                l_val = node.get(int_key)
-                if isinstance(l_val, str) and ":=" in l_val:
-                    actual_out_key = l_val.split(":=")[-1].strip()
-                item.pop(actual_out_key, None)
-
-            results.append(item)
-
-        # --- PHASE 4: PLUCK (FLATTENING) ---
-        # If pluck is true and exactly one field remains, convert [{key: val}] to [val]
-        if meta.get("pluck", False) and results:
-            if all(len(obj) == 1 for obj in results):
-                return [list(obj.values())[0] for obj in results]
+                    plucked_results.append(vals)
+            
+            # SPECIAL CASE: If there is only one row and it has multiple values,
+            # flatten it to a single list: ["Singam", "Action"]
+            if len(plucked_results) == 1 and isinstance(plucked_results[0], list):
+                return plucked_results[0]
+                
+            return plucked_results
             
         return results

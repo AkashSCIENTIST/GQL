@@ -1,94 +1,77 @@
-# GQL-JSON Query Engine (Advanced)
+# 📊 GQL-to-CSV Query Engine
+> **A lightweight tool to query, filter, and join CSV files using a custom GraphQL-like syntax.**
 
-A highly recursive, metadata-driven query engine that translates custom Graph Query Language (GQL) into a structured JSON AST for processing across relational CSV data sources.
-
-## 🚀 Key Features
-
-### 1. Multi-Root Queries & Global Variables
-Supports querying multiple disparate tables in a single GQL file and defining a `variables {}` block for constants used throughout the query.
-
-### 2. Nested Relational Joins
-Perform deep lookups (e.g., Directors → Movies → Actors) by passing parent-scoped variables into child filters using the '=' operator.
-
-### 3. Metadata Operators
-| Operator | Name | Function |
-| :--- | :--- | :--- |
-| **`!`** | **Strict** | Discards parent row if the child block returns no results (Inner Join). |
-| **`~`** | **Internal** | Field is used for filtering or logic but is stripped from final JSON. |
-| **`*`** | **Pluck** | If a block results in one visible field, it flattens the list of objects into a simple array. |
-
-### 4. Arithmetic Ranges & Sets
-Full support for mathematical interval notation and set-based filtering:
-- **Inclusive**: [50, 100] (>= 50 AND <= 100)
-- **Exclusive**: (0, 10) (> 0 AND < 10)
-- **Half-Open**: [50, 100) or (0, 10]
-- **Sets**: {"India", "USA"} (Membership check)
-
-### 5. Advanced Aliasing
-Rename columns or entire nested result blocks using the ':=' operator.
-- Column: id := dir_var
-- Block: movies { ... } := directed_movies
+## 🌟 Introduction
+This engine treats a folder of CSV files like a relational database. It handles complex relationships (like a Director having many Movies) and produces clean, nested JSON output without writing SQL.
 
 ---
 
-## 🛠 Syntax Reference
+## 🛠️ Project Setup
 
-### Variable Definition & Conditional Nesting
-Example of using global variables to filter nested blocks:
+1. Folder Structure:
+   - project/
+     - main.py                (Main runner)
+     - generator.py           (Query parser)
+     - query.gql              (Your GQL query)
+     - adapters/
+       - csv_adapter.py       (CSV logic)
+     - data/                  (Your .csv files)
 
-variables {
-    min_budget : 50,
-    target_country : "India"
+2. Dependencies:
+   Requires Pandas.
+   - pip install pandas
+
+---
+
+## ✍️ The Query Syntax Guide
+
+| Symbol | Name     | Description                                  | Example           |
+| :----- | :------- | :------------------------------------------- | :---------------- |
+| <...>  | Table    | Defines which CSV file to open.              | <movies>          |
+| !      | Strict   | Hides parent if sub-table is empty.          | !<movies>         |
+| ~      | Internal | Uses field for logic but hides it from JSON. | ~budget           |
+| * | Pluck    | Returns only raw values (removes keys).      | *{ name }         |
+| :=     | Alias    | Renames a field or saves to a variable.      | id := dir_var     |
+| $      | Global   | Defines reusable variables at the top.       | $min_budget       |
+
+---
+
+## 🚀 How to Use
+
+### 1. Define Globals (query.gql)
+$global {
+    target: "India",
+    min_pay: 50
 }
 
-directors {
+### 2. Write your Query (query.gql)
+<directors> {
+    id := dir_var,
+    country : $target,
     name,
-    country : target_country,  # Using global variable
-    !movies *{
+    !<movies> *{
         name,
-        ~budget : [min_budget, 500],
-        ~director_id = id
-    } := high_budget_films
+        genre,
+        ~budget: [$min_pay, 100],
+        ~director_id = dir_var
+    } := directed_movies
 }
 
----
-
-## 💻 Technical Implementation
-
-### Phase 1: generator.py (The Parser)
-A Recursive Descent Parser with depth-aware expression handling. It tracks brace depth to ensure complex ranges like [10, 20] are captured as single tokens.
-
-
-
-### Phase 2: csv_adapter.py (The Engine)
-Built on Pandas, the adapter performs:
-1. **Dynamic Reindexing**: Prevents UserWarnings by aligning boolean masks with current DataFrame states.
-2. **Context Propagation**: Maintains a dictionary of variables (parent keys and globals) passed down the recursion tree.
-3. **Array Flattening**: Detects the 'pluck' flag to simplify single-field outputs.
+### 3. Run it
+- python main.py
 
 ---
 
-## 📊 Example Execution
+## 🔍 Understanding "Pluck" Output (*)
 
-### Input GQL:
-directors {
-    id := d_id,
-    movies *{
-        name,
-        ~budget : [50, 100],
-        ~director_id = d_id
-    } := titles
-}
-
-### Output JSON:
-[
-    {
-        "d_id": "d1",
-        "titles": ["Movie A", "Movie B"]
-    }
-]
+The pluck symbol makes JSON cleaner:
+- Single Field: movies *{ name } -> ["Singam", "Avatar"]
+- Multi Field: movies *{ name, genre } -> ["Singam", "Action"]
 
 ---
 
-## 📄 License
-MIT License
+## 🛠️ Troubleshooting
+
+- Empty list []: Check ! marks. If filters are too tight, strict tables hide everything. Ensure CSVs have no leading spaces.
+- Variable not found: Ensure variables in $global start with $.
+- Column not found: Match query names to CSV header names exactly.
