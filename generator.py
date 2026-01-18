@@ -132,13 +132,24 @@ class GQLParser:
         while self.pos < len(self.tokens):
             k, v = self.peek()
             if k == 'ID' and v == "$global":
-                self.consume(); self.consume()
+                self.consume(); self.consume() # $global {
                 raw_ast["__globals__"] = self.parse_variables_block()
             elif k == 'TABLE':
-                t_name = self.consume()[1][1:-1]
-                self.consume()
-                raw_ast[t_name] = self.parse_block()
-            else: self.pos += 1
+                t_name = self.consume()[1][1:-1] # Get 'directors' from <directors>
+                
+                # --- NEW LOGIC TO CAPTURE TOP-LEVEL PLUCK ---
+                is_pluck = False
+                if self.peek()[0] == 'PLUCK':
+                    self.consume() # Consume '*'
+                    is_pluck = True
+                
+                if self.peek()[0] == 'LBRACE':
+                    self.consume() # Consume '{'
+                    node = self.parse_block()
+                    node["__meta__"]["pluck"] = is_pluck # Set pluck correctly
+                    raw_ast[t_name] = node
+            else:
+                self.pos += 1
         return self.resolve_macros(raw_ast)
 
     def parse_block(self):

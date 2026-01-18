@@ -32,7 +32,7 @@ This engine treats a folder of CSV files like a relational database. It handles 
 | ~      | Internal | Uses field for logic but hides it from JSON. | ~budget           |
 | * | Pluck    | Returns only raw values (removes keys).      | *{ name }         |
 | :=     | Alias    | Renames a field or saves to a variable.      | id := dir_var     |
-| $      | Global   | Defines reusable variables at the top.       | $min_budget       |
+| \$      | Global   | Defines reusable variables at the top.       | $min_budget       |
 
 ---
 

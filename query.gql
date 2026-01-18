@@ -4,7 +4,7 @@ $global {
     target_country : "India"
 }
 
-<directors> {
+<directors> *{
     id := dir_var,
     country : $target_country,  # Using global variable
     name,
