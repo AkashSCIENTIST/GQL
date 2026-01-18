@@ -39,12 +39,6 @@ This engine treats a folder of CSV files like a relational database. It handles 
 ## 🚀 How to Use
 
 ### 1. Define Globals (query.gql)
-$global {
-    target: "India",
-    min_pay: 50
-}
-
-### 2. Write your Query (query.gql)
 ```
 $global {
     min_budget : 50,
@@ -52,7 +46,9 @@ $global {
     high_movie_budget : [101, 500],
     target_country : {"India", "Sri Lanka"}
 }
-
+```
+### 2. Write your Query (query.gql)
+```
 <directors> {
     id := dir_var,
     country : $target_country,  # Using global variable
