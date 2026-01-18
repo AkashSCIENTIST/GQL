@@ -75,3 +75,7 @@ The pluck symbol makes JSON cleaner:
 - Empty list []: Check ! marks. If filters are too tight, strict tables hide everything. Ensure CSVs have no leading spaces.
 - Variable not found: Ensure variables in $global start with $.
 - Column not found: Match query names to CSV header names exactly.
+
+## ⚙️ Features to be added
+
+- Strict key support when multiple subtables are used

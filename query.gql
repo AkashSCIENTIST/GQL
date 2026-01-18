@@ -1,16 +1,38 @@
 $global {
     min_budget : 50,
-    movie_budget : [$min_budget, 100]
-    target_country : "India"
+    low_movie_budget : [$min_budget, 100],
+    high_movie_budget : [101, 500],
+    target_country : {"India", "Sri Lanka"}
 }
 
-<directors> *{
+<directors> {
     id := dir_var,
     country : $target_country,  # Using global variable
     name,
-    !<movies> *{
+    <movies> {
         name,
-        budget : $movie_budget,
+        ~budget : $low_movie_budget,
         ~director_id = dir_var := directors_id
-    } := directed_movies
-}
+    } := low_budget_movies,
+    <movies> {
+        name,
+        budget : $high_movie_budget,
+        ~director_id = dir_var := directors_id
+    } := high_budget_movies
+} := directors_india
+
+<directors> {
+    id := dir_var,
+    country : "USA",  # Using local variable
+    name,
+    <movies> {
+        name,
+        ~budget : $low_movie_budget,
+        ~director_id = dir_var := directors_id
+    } := low_budget_movies,
+    <movies> {
+        name,
+        budget : $high_movie_budget,
+        ~director_id = dir_var := directors_id
+    } := high_budget_movies
+} := directors_usa
