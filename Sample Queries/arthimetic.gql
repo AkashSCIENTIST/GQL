@@ -1,13 +1,19 @@
 $global {
-    min_budget : 50,
-    low_movie_budget : [$min_budget, 100],
-    high_movie_budget : [101, 500],
-    target_country : {"India", "Sri Lanka"}
+    min_budget : 50
+    print("min_budget :", $min_budget)
+    double_min : $min_budget * 2
+    low_movie_budget : [$min_budget, $min_budget * 2]
+    high_movie_budget : [$double_min + 1, 1 << 9]
+    mask : 1 << 3
+    print($mask)
+    flags : {$mask, 8}
+    target_country : {"India", "USA"}
+    print($target_country)
 }
 
 <directors> {
     id := dir_var,
-    country : $target_country,  # Using global variable
+    country : $target_country,
     name,
     <movies> {
         name,
@@ -19,11 +25,11 @@ $global {
         budget : $high_movie_budget,
         ~director_id = dir_var := directors_id
     } := high_budget_movies
-} := directors_india
+} := directors_math_1
 
 <directors> {
     id := dir_var,
-    country : "USA",  # Using local variable
+    country : "USA",
     name,
     <movies> {
         name,
@@ -35,4 +41,4 @@ $global {
         budget : $high_movie_budget,
         ~director_id = dir_var := directors_id
     } := high_budget_movies
-} := directors_usa
+} := directors_math_2

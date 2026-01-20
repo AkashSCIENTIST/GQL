@@ -1,16 +1,25 @@
 import json
 import os
+import sys
 from generator import GQLParser
 from adapters.csv_adapter import CSVAdapter
 
 def run():
     # 1. Read the Query file
-    query_file = "query.gql"
+    # Priority: CLI arg > Sample Queries/pluck.gql > basic.gql
+    query_file = None
+    if len(sys.argv) > 1:
+        query_file = sys.argv[1]
+    elif os.path.exists(os.path.join('Sample Queries', 'pluck.gql')):
+        query_file = os.path.join('Sample Queries', 'pluck.gql')
+    else:
+        query_file = os.path.join('Sample Queries', 'arthimetic.gql')
+
     if not os.path.exists(query_file):
         print(f"Error: {query_file} not found.")
         return
 
-    with open(query_file, "r") as f:
+    with open(query_file, "r", encoding='utf-8') as f:
         gql = f.read()
 
     # 2. Parse the Query into an AST
@@ -33,9 +42,9 @@ def run():
     final_output = {}
     
     for table_name, node in query_ast.items():
-        # The key in query_ast is the CSV filename (e.g., 'directors')
-        # We pass this to the adapter so it finds 'directors.csv'
-        results = adapter.execute(table_name, node)
+        # Use the original table source (CSV filename) when executing the adapter.
+        table_source = node.get("__meta__", {}).get("table_source", table_name)
+        results = adapter.execute(table_source, node)
         
         # Check if a top-level alias was defined (e.g., <directors> { ... } := details)
         # If no alias exists, fallback to the table_name

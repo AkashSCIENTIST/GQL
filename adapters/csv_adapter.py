@@ -51,7 +51,8 @@ class CSVAdapter:
         # 1. Load data and sanitize (strip spaces, treat as strings)
         df = pd.read_csv(file_path, dtype=str)
         df.columns = df.columns.str.strip()
-        df = df.map(lambda x: str(x).strip() if pd.notnull(x) else "")
+        # Normalize all cell values to stripped strings
+        df = df.applymap(lambda x: str(x).strip() if pd.notnull(x) else "")
         
         context = context or {}
 
@@ -62,8 +63,15 @@ class CSVAdapter:
             
             # CASE 1: List Filtering (e.g., {"India", "USA"} -> ["India", "USA"])
             if isinstance(l, list):
-                df = df[df[k].astype(str).isin([str(x) for x in l])]
-                self._log(f"      List Filter {k} IN {l}: {len(df)} rows remain.")
+                # strip surrounding quotes from list items for robust matching
+                def _norm(x):
+                    s = str(x)
+                    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                        return s[1:-1]
+                    return s
+                nl = [_norm(x) for x in l]
+                df = df[df[k].astype(str).isin([str(x) for x in nl])]
+                self._log(f"      List Filter {k} IN {nl}: {len(df)} rows remain.")
 
             # CASE 2: Range Filtering (e.g., [50, 100])
             elif isinstance(l, dict):
@@ -78,8 +86,11 @@ class CSVAdapter:
                     if val: 
                         df = df[df[k] == val]
                 elif not l.startswith(":="):
-                    # Scalar Equality
-                    df = df[df[k].str.lower() == l.lower()]
+                    # Scalar Equality - strip surrounding quotes if present
+                    s = str(l)
+                    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                        s = s[1:-1]
+                    df = df[df[k].str.lower() == s.lower()]
 
         # --- PHASE 2: ITERATION & RECURSION ---
         results = []
@@ -124,24 +135,30 @@ class CSVAdapter:
         # --- PHASE 3: PLUCK (*) & DOUBLE PLUCK (**) ---
         pluck_level = meta.get("pluck", 0)
 
-        if pluck_level > 0 and results:
+        if pluck_level > 0:
+            # Build a 2D list where each inner list corresponds to the item's values
             final_plucked = []
             for item in results:
                 row_values = []
                 for val in item.values():
-                    # DOUBLE PLUCK (**) Flattening
+                    # DOUBLE PLUCK (**) will flatten nested lists into the inner row
                     if pluck_level == 2 and isinstance(val, list):
                         row_values.extend(val)
                     else:
                         row_values.append(val)
-                
-                if len(row_values) == 1:
-                    final_plucked.append(row_values[0])
-                else:
-                    final_plucked.append(row_values)
-            
-            if len(final_plucked) == 1:
-                return final_plucked[0]
+                # Always append as a list (preserve 2D shape for single-row results)
+                final_plucked.append(row_values)
+
+            # If double-pluck requested, flatten the 2D list into a single 1D list
+            if pluck_level == 2:
+                flat = []
+                for rv in final_plucked:
+                    if isinstance(rv, list):
+                        flat.extend(rv)
+                    else:
+                        flat.append(rv)
+                return flat
+
             return final_plucked
-            
+
         return results
