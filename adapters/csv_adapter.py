@@ -1,4 +1,4 @@
-import pandas as pd # type: ignore
+import polars as pl # type: ignore
 import os
 
 class CSVAdapter:
@@ -13,23 +13,30 @@ class CSVAdapter:
 
     def _apply_filter(self, df, col, logic):
         """Applies numeric range logic without reindexing warnings."""
-        if not isinstance(logic, dict) or df.empty: 
+        if not isinstance(logic, dict) or (hasattr(df, 'is_empty') and df.is_empty()):
             return df
-        
+
         ops = {"__ge__": ">=", "__gt__": ">", "__le__": "<=", "__lt__": "<"}
-        
+
         for k, p_op in ops.items():
             if k in logic:
                 lim = float(logic[k])
-                # Recalculate col_num for the CURRENT state of df to keep indices aligned
-                col_num = pd.to_numeric(df[col], errors='coerce')
-                
-                if p_op == ">=": df = df[col_num >= lim]
-                elif p_op == ">": df = df[col_num > lim]
-                elif p_op == "<=": df = df[col_num <= lim]
-                elif p_op == "<": df = df[col_num < lim]
-                
-                self._log(f"      Filter {col} {p_op} {lim}: {len(df)} rows remain.")
+                # Use Polars vectorized comparisons after casting to Float64
+                if p_op == ">=":
+                    df = df.filter(pl.col(col).cast(pl.Float64) >= lim)
+                elif p_op == ">":
+                    df = df.filter(pl.col(col).cast(pl.Float64) > lim)
+                elif p_op == "<=":
+                    df = df.filter(pl.col(col).cast(pl.Float64) <= lim)
+                elif p_op == "<":
+                    df = df.filter(pl.col(col).cast(pl.Float64) < lim)
+
+                # polars DataFrame length
+                try:
+                    remaining = df.height
+                except Exception:
+                    remaining = len(df)
+                self._log(f"      Filter {col} {p_op} {lim}: {remaining} rows remain.")
         return df
 
     def execute(self, table_key, node, context=None):
@@ -48,11 +55,21 @@ class CSVAdapter:
             self._log(f"File {file_path} missing.")
             return []
         
-        # 1. Load data and sanitize (strip spaces, treat as strings)
-        df = pd.read_csv(file_path, dtype=str)
-        df.columns = df.columns.str.strip()
-        # Normalize all cell values to stripped strings
-        df = df.applymap(lambda x: str(x).strip() if pd.notnull(x) else "")
+        # 1. Load data and sanitize (strip spaces, treat as strings) using polars
+        df = pl.read_csv(file_path)
+        # Normalize column names (strip surrounding spaces)
+        new_cols = [c.strip() for c in df.columns]
+        if new_cols != list(df.columns):
+            df = df.rename({old: new for old, new in zip(list(df.columns), new_cols)})
+        # Cast all columns to Utf8 and strip string values
+        # Use .apply with return_dtype for compatibility across polars versions
+        df = df.with_columns([
+                        pl.col(c)
+                            .cast(pl.Utf8)
+                            .map_elements(lambda s: s.strip() if s is not None else "", return_dtype=pl.Utf8)
+                            .alias(c)
+            for c in df.columns
+        ])
         
         context = context or {}
 
@@ -70,8 +87,12 @@ class CSVAdapter:
                         return s[1:-1]
                     return s
                 nl = [_norm(x) for x in l]
-                df = df[df[k].astype(str).isin([str(x) for x in nl])]
-                self._log(f"      List Filter {k} IN {nl}: {len(df)} rows remain.")
+                df = df.filter(pl.col(k).is_in([str(x) for x in nl]))
+                try:
+                    remaining = df.height
+                except Exception:
+                    remaining = len(df)
+                self._log(f"      List Filter {k} IN {nl}: {remaining} rows remain.")
 
             # CASE 2: Range Filtering (e.g., [50, 100])
             elif isinstance(l, dict):
@@ -83,21 +104,34 @@ class CSVAdapter:
                     # Join: =dir_var
                     v_name = l[1:].split(":=")[0].strip()
                     val = str(context.get(v_name, "")).strip()
+                    # Fallback: if the named context variable isn't present, try common parent id
+                    if not val:
+                        val = str(context.get('id', '')).strip()
                     if val: 
-                        df = df[df[k] == val]
+                        df = df.filter(pl.col(k) == val)
                 elif not l.startswith(":="):
                     # Scalar Equality - strip surrounding quotes if present
                     s = str(l)
                     if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
                         s = s[1:-1]
-                    df = df[df[k].str.lower() == s.lower()]
+                    # perform case-insensitive match via map_elements to normalize
+                    df = df.filter(pl.col(k).map_elements(lambda x: x.lower() if x is not None else "", return_dtype=pl.Utf8) == s.lower())
 
         # --- PHASE 2: ITERATION & RECURSION ---
         results = []
         noise_keys = {"Using", "global", "variable"}
-        valid_keys = [k for k in node.keys() if k not in noise_keys and (k in df.columns or (isinstance(node[k], dict) and "__meta__" in node[k]))]
+        # valid keys include columns, nested table nodes (with __meta__), and function nodes (with __func__)
+        valid_keys = [
+            k for k in node.keys()
+            if k not in noise_keys and (
+                k in df.columns or
+                (isinstance(node[k], dict) and ("__meta__" in node[k] or "__func__" in node[k]))
+            )
+        ]
 
-        for _, row in df.iterrows():
+        # Convert to list of dicts for row-wise processing (keeps behavior consistent)
+        rows = df.to_dicts()
+        for row in rows:
             item, row_ctx, skip = {}, context.copy(), False
             
             # Populate context for children (important for joins)
@@ -122,8 +156,57 @@ class CSVAdapter:
                     
                     alias = l["__meta__"].get("alias", k)
                     item[alias] = sub_res
+                elif isinstance(l, dict) and "__func__" in l:
+                    # Function handling (e.g., count)
+                    func_name = l.get("__func__")
+                    arg = l.get("__arg__")
+                    if isinstance(arg, dict):
+                        # determine subtable key to call execute: prefer alias then table_source
+                        sub_key = arg.get("__meta__", {}).get("alias") or arg.get("__meta__", {}).get("table_source")
+                        sub_res = self.execute(sub_key, arg, context=row_ctx)
+                    else:
+                        # if arg is expression string, evaluate or skip
+                        sub_res = []
+
+                    if func_name == 'count':
+                        if isinstance(sub_res, list):
+                            item[out_k] = len(sub_res)
+                        else:
+                            item[out_k] = 1 if sub_res else 0
+                    elif func_name == 'sum':
+                        # Sum a numeric column from the sub-res rows.
+                        # Determine target field from the function arg's requested keys (ignore __meta__ and internal keys)
+                        total = 0.0
+                        if isinstance(arg, dict) and isinstance(sub_res, list):
+                            sub_meta = arg.get('__meta__', {})
+                            internal = set(sub_meta.get('internal_keys', []))
+                            candidate_fields = [k for k in arg.keys() if k != '__meta__' and k not in internal]
+                            if candidate_fields:
+                                field = candidate_fields[0]
+                                for r in sub_res:
+                                    try:
+                                        v = r.get(field, 0)
+                                        # accept numbers in strings and remove commas
+                                        if isinstance(v, str):
+                                            v = v.replace(',', '')
+                                        total += float(v)
+                                    except Exception:
+                                        # ignore non-numeric or missing values
+                                        continue
+                                # prefer int when possible
+                                if total.is_integer():
+                                    item[out_k] = int(total)
+                                else:
+                                    item[out_k] = total
+                            else:
+                                item[out_k] = 0
+                        else:
+                            item[out_k] = 0
+                    else:
+                        # unknown function: return raw result
+                        item[out_k] = sub_res
                 else:
-                    item[out_k] = row[k]
+                    item[out_k] = row.get(k)
 
             if not skip:
                 # Cleanup INTERNAL (~) keys

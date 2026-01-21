@@ -1,0 +1,9 @@
+<directors> {
+    id := dir_var,
+    country,
+    name,
+    sum(<movies> {
+        budget,
+        ~director_id = dir_var := directors_id
+    }) := budget_consumed
+}

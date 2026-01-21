@@ -570,6 +570,42 @@ class GQLParser:
 
             elif k == 'ID':
                 ident = self.consume()[1]
+                # Function-like calls: e.g. count(<movies> *{ ... })
+                if self.peek()[0] == 'LPAREN':
+                    # consume '('
+                    self.consume()
+                    # Expect a TABLE expression inside
+                    fk, fv = self.peek()
+                    func_arg = None
+                    if fk == 'TABLE':
+                        t_source = self.consume()[1][1:-1]
+                        sub_pluck = 0
+                        if self.peek()[0] == 'PLUCK':
+                            sub_pluck = len(self.consume()[1])
+
+                        self.consume() # consume '{'
+                        sub = self.parse_block()
+                        sub["__meta__"]["pluck"] = sub_pluck
+                        sub["__meta__"]["table_source"] = t_source
+                        func_arg = sub
+                    else:
+                        # fallback: parse expression until RPAREN
+                        expr = self.parse_expr()
+                        func_arg = expr
+
+                    # consume ')'
+                    if self.peek()[0] == 'RPAREN': self.consume()
+
+                    func_node = {"__func__": ident, "__arg__": func_arg}
+
+                    # support alias after function call
+                    if self.peek()[0] == 'ALIAS':
+                        self.consume(); ast_key = self.consume()[1]
+                        node[ast_key] = func_node
+                        continue
+                    else:
+                        node[ident] = func_node
+                        continue
                 if internal: node["__meta__"]["internal_keys"].append(ident)
                 nk, nv = self.peek()
                 if nk == 'ALIAS':

@@ -1,0 +1,15 @@
+<directors> {
+    id := dir_var
+    country,
+    name,
+    count(<movies> {
+        name,
+        budget,
+        ~director_id = dir_var := directors_id
+    }) := alias_count,
+    count(<movies> {
+        name,
+        budget,
+        ~director_id = dir_var := directors_id
+    })
+}
